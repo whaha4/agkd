@@ -1,6 +1,5 @@
 add_rules("mode.debug", "mode.release")
-add_requires("serial")
-set_toolchains("clang")
+-- set_toolchains("clang")
 
 option("type")
 set_default("infantry")
@@ -15,7 +14,9 @@ end)
 target("GKDControl")
 set_kind("binary")
 set_languages("c++23")
+add_files("src/**.cc")
 add_includedirs(
+	"3rdparty/include",
 	"include",
 	"include/chassis",
 	"include/configs",
@@ -29,7 +30,8 @@ add_includedirs(
 	"./include/io",
 	"./include/shoot"
 )
-add_packages("serial")
+add_linkdirs("3rdparty/lib")
+add_links("serial")
 set_warnings("allextra")
 
 add_options("type")

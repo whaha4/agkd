@@ -63,7 +63,7 @@ ControllerList operator>>(const ControllerList &c1, const ControllerList &c2) {
     return ControllerList{c1, c2};
 }
 
-ControllerList operator>>(ControllerLirelost &&c1, ControllerList &&c2) {
+ControllerList operator>>(ControllerList &&c1, ControllerList &&c2) {
     return ControllerList{std::move(c1), std::move(c2)};
 }
 
