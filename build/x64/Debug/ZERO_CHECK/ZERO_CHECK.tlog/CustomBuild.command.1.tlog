@@ -1,0 +1,10 @@
+^C:\USERS\ASUS\DESKTOP\GKD\BUILD\CMAKEFILES\B929A9889FB6ED9FCA443BD515AB76A3\GENERATE.STAMP.RULE
+setlocal
+"C:\Program Files\Microsoft Visual Studio\18\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe" -SC:/Users/ASUS/Desktop/gkd/GKD_Control -BC:/Users/ASUS/Desktop/gkd/build --check-stamp-list CMakeFiles/generate.stamp.list --vs-solution-file C:/Users/ASUS/Desktop/gkd/build/new_infantry.slnx
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd

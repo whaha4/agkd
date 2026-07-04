@@ -1,0 +1,3 @@
+C:/Users/ASUS/Desktop/gkd/build/CMakeFiles/new_infantry.dir
+C:/Users/ASUS/Desktop/gkd/build/CMakeFiles/ALL_BUILD.dir
+C:/Users/ASUS/Desktop/gkd/build/CMakeFiles/ZERO_CHECK.dir

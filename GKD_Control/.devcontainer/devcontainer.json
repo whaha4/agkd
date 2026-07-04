@@ -1,0 +1,19 @@
+{
+  "name": "Ubuntu Dev",
+  "build": { "dockerfile": "Dockerfile" },
+  "remoteUser": "gkd",
+  "postCreateCommand": "xmake project -k compile_commands",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-vscode.cpptools-extension-pack",
+        "llvm-vs-code-extensions.vscode-clangd",
+        "tboox.xmake-vscode",
+        "vadimcn.vscode-lldb"
+      ]
+    }
+  },
+  "mounts": [
+        "source=${localEnv:HOME}/.gitconfig,target=/home/vscode/.gitconfig,type=bind,consistency=cached"
+  ]
+}

@@ -1,0 +1,12 @@
+.cache/
+build/
+*.friction
+*.a
+.vscode
+compile_commands.json
+cmake-build-debug
+.idea
+.xmake
+.venv
+scripts/*.png
+log/*.txt

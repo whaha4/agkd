@@ -1,0 +1,185 @@
+#include "device/rc_controller.hpp"
+#include "io.hpp"
+#include "serial_interface.hpp"
+#include "types.hpp"
+#include "utils.hpp"
+
+namespace Device
+{
+
+    Rc_Controller::Rc_Controller(const std::string &serial_name) : serial_name(serial_name) {
+    }
+
+    void Rc_Controller::init(const std::shared_ptr<Robot::Robot_set> &robot) {
+        robot_set = robot;
+        auto serial_interface = IO::io<SERIAL>[serial_name];
+        if (serial_interface == nullptr) {
+            LOG_ERR("RC_CONTROLLER Error: no serial named %s\n", serial_name.c_str());
+            return;
+        }
+        serial_interface->register_callback<Types::ReceivePacket_RC_CTRL>(
+            [&](const Types::ReceivePacket_RC_CTRL &rp) { unpack(rp); });
+        delta = 0;
+    }
+
+    void Rc_Controller::unpack(const Types::ReceivePacket_RC_CTRL &pkg) {
+        static bool wz_key_pressed_last = false;
+        static bool friction_key_pressed_last = false;
+
+       
+        if (pkg.s1 == S1_DOWN && pkg.s2 == S2_DOWN && pkg.ch4 == ROLL_UP_MAX) {
+            inited = true;
+        } 
+
+        if (!robot_set->referee_info.game_robot_status_data.mains_power_chassis_output) {
+            robot_set->wz_set = 0;
+            robot_set->spin_state = false;
+            wz_key_pressed_last = false;            
+        }
+
+        if (!robot_set->referee_info.game_robot_status_data.mains_power_shooter_output) {
+            robot_set->friction_open = false;
+             robot_set->friction_real_state = false;
+            robot_set->shoot_open = SHOOT_PERMISSION_NONE;
+            robot_set->cv_fire = false;
+            friction_key_pressed_last = false;
+        }
+
+
+
+#ifndef CONFIG_SENTRY 
+        float vx = 0, vy = 0;
+        float speed = 1;
+
+        if (pkg.key & KEY_D) {
+            vx++;
+        }
+        if (pkg.key & KEY_A) {
+            vx--;
+        }
+        if (pkg.key & KEY_S) {
+            vy--;
+        }
+        if (pkg.key & KEY_W) {
+            vy++;
+        }
+
+        robot_set->vx_set = vx * speed;
+        robot_set->vy_set = vy * speed;
+
+        if (pkg.key) {
+            // LOG_INFO("key : %d\n", pkg.key);
+        }
+
+
+        // 切换自旋状态
+        if (robot_set->referee_info.game_robot_status_data.mains_power_chassis_output) {
+            if (pkg.key & KEY_R) {
+                if (!wz_key_pressed_last) {
+                    robot_set->wz_set = 1 - robot_set->wz_set;
+                }
+            wz_key_pressed_last = true;
+            } else {
+                wz_key_pressed_last = false;
+            }
+        }
+
+        // 切换摩擦轮状态
+        if (robot_set->referee_info.game_robot_status_data.mains_power_shooter_output) {
+            if (pkg.key & KEY_F) {
+                if (!friction_key_pressed_last) {
+                    robot_set->friction_open = !robot_set->friction_open;
+                }
+                friction_key_pressed_last = true;
+            } else {
+                friction_key_pressed_last = false;
+            }
+        }
+
+
+
+        if (pkg.mouse_r || (pkg.s1 == S1_DOWN && pkg.s2 == S2_UP)) {
+            robot_set->auto_aim_status = true;
+            // LOG_INFO("auto aim status : %d\n", pkg.s1);
+        } else {
+            robot_set->auto_aim_status = false;
+        }
+
+        if (pkg.mouse_l || pkg.ch4 == ROLL_DOWN_MAX) {
+            robot_set->shoot_open = SHOOT_PERMISSION_GIMBAL1;
+        } else {
+            robot_set->shoot_open = SHOOT_PERMISSION_NONE;
+        }
+
+        // LOG_INFO("mouse_y:%d robot_set->gimbalT_1_pitch_set:%f\n",pkg.mouse_y, robot_set->gimbalT_1_pitch_set);
+        // LOG_INFO("mouse_x:%d\n", pkg.mouse_x);
+        // LOG_INFO("pkg size: %lu\t real size: %lu\n", sizeof(Types::ReceivePacket_RC_CTRL), sizeof(pkg));
+        if (!robot_set->auto_aim_status) {
+            robot_set->gimbalT_1_yaw_set += pkg.mouse_x / 10000.;
+            robot_set->gimbalT_1_pitch_set -= pkg.mouse_y / 10000.;
+            robot_set->gimbalT_1_pitch_set =
+                std::clamp(robot_set->gimbalT_1_pitch_set, -0.3f, 0.3f); 
+        }
+
+
+
+
+#endif
+
+        static bool use_key = false;
+
+        if (pkg.key & KEY_PRESS) {
+            use_key = true;
+        }
+
+        if (use_key) {
+            return; 
+        }
+            
+
+        // auto-aim, disable control
+        // if (pkg.s1 == S1_DOWN) {
+        //     return; 
+        // }
+        if (inited) {
+            // LOG_INFO("rc controller ch1 %d %d %d %d\n", pkg.s1, pkg.s2, pkg.ch1, pkg.ch3);
+            robot_set->vx_set = ((float)pkg.ch3 / RC_SCALE) * CHASSIS_SPEED_SCALE;
+            robot_set->vy_set = ((float)pkg.ch2 / RC_SCALE) * CHASSIS_SPEED_SCALE;
+
+            if (robot_set->mode == Types::ROBOT_MODE::ROBOT_SEARCH) {
+                robot_set->gimbal_sentry_yaw_set += ((float)pkg.ch0 / RC_SCALE) * GIMBAL_YAW_SENSITIVITY;
+            } else if(!robot_set->auto_aim_status){
+                robot_set->gimbalT_1_yaw_set += ((float)pkg.ch0 / RC_SCALE) * GIMBAL_YAW_SENSITIVITY;
+                robot_set->gimbalT_1_pitch_set = ((float)pkg.ch1 / RC_SCALE) * GIMBAL_PITCH_SENSITIVITY;
+                
+                IFDEF(CONFIG_SENTRY, robot_set->gimbalT_2_yaw_set = robot_set->gimbalT_1_yaw_set;
+                    robot_set->gimbalT_2_pitch_set = robot_set->gimbalT_1_pitch_set;)
+            }
+
+            if (pkg.s1 == S1_UP)
+                robot_set->wz_set = 1.0;
+            else
+                robot_set->wz_set = 0;
+
+            if (pkg.s2 == S2_UP)
+                robot_set->friction_open = true;
+            else
+                robot_set->friction_open = false;
+
+            IFDEF(
+                CONFIG_SENTRY,
+                if (pkg.s2 == S2_DOWN) {
+                    robot_set->sentry_follow_gimbal = true;
+                    robot_set->friction_open = true;
+                    if (pkg.ch4 == ROLL_DOWN_MAX)
+                        robot_set->shoot_open = SHOOT_PERMISSION_GIMBAL1s;
+                    else
+                        robot_set->shoot_open = SHOOT_PERMISSION_NONE;
+                } else {
+                    robot_set->sentry_follow_gimbal = false;
+                    robot_set->friction_open = false;
+                })
+        }
+        update_time();
+    }
+}  // namespace Device
