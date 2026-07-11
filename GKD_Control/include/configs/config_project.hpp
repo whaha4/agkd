@@ -13,12 +13,12 @@ namespace Config
 {
     using GimbalType = Gimbal::GimbalT;
 
-    const std::vector<std::string> CanInitList = { "CAN_CHASSIS", "CAN_GIMBAL" };
+    const std::vector<std::string> CanInitList = { "CAN_CHASSIS" };
 
-    const std::vector<std::string> SocketInitList = { "AUTO_AIM_CONTROL" };
+    const std::vector<std::string> SocketInitList = {};
 
-    const std::vector<std::tuple<std::string, int, int>> SerialInitList = {
-        { "/dev/IMU_HERO", 115200, 2000 }
+    const std::vector<std::tuple<std::string, int, int>> SerialInitList = 
+        {
     };
 
     const std::string rc_controller_serial = "/dev/IMU_HERO";

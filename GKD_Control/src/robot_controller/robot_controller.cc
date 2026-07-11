@@ -32,13 +32,13 @@ namespace Robot
         );
         
         chassis.init(robot_set);
-        gimbal.init(robot_set);
+        //gimbal.init(robot_set);
         IFDEF(CONFIG_SENTRY, gimbal_sentry.init(robot_set));
 
         // start DJIMotorManager thread
         Hardware::DJIMotorManager::start();
 
-        threads.emplace_back(&Config::GimbalType::init_task, &gimbal);
+        //threads.emplace_back(&Config::GimbalType::init_task, &gimbal);
         IFDEF(CONFIG_SENTRY, threads.emplace_back(&Gimbal::GimbalT::init_task, &gimbal_sentry));
     }
 
@@ -47,7 +47,7 @@ namespace Robot
     }
 
     void Robot_ctrl::start() {
-        threads.emplace_back(&Config::GimbalType::task, &gimbal);
+        //threads.emplace_back(&Config::GimbalType::task, &gimbal);
         threads.emplace_back(&Chassis::Chassis::task, &chassis);
        threads.emplace_back(&Device::Dji_referee::task, &referee);
        threads.emplace_back(&Device::Dji_referee::task_ui, &referee);

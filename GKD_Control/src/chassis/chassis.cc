@@ -127,6 +127,19 @@ namespace Chassis
                     // motors[i].give_current = cmd_power[i];
                     //LOG_INFO("i:%d, plan:%f, fact:%f\n", i, cmd_power[i], robot_set->super_cap_info.chassisPower);
                 }
+                static auto last = std::chrono::steady_clock::now();
+                    auto now = std::chrono::steady_clock::now();
+                         if (now - last > std::chrono::milliseconds(100)) {   // 每 100ms 打一次
+                            LOG_INFO("cur: %d %d %d %d | set:%.2f %.2f %.2f %.2f | real:%.2f %.2f %.2f %.2f\n",
+                                motors[0].give_current, motors[1].give_current,
+                                motors[2].give_current, motors[3].give_current,
+                                wheel_speed[0], wheel_speed[1], wheel_speed[2], wheel_speed[3],
+                                motors[0].data_.output_linear_velocity,
+                                motors[1].data_.output_linear_velocity,
+                                motors[2].data_.output_linear_velocity,
+                                motors[3].data_.output_linear_velocity);
+                                last = now;
+}
             }
             UserLib::sleep_ms(config.ControlTime);
         }
