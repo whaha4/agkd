@@ -105,7 +105,7 @@
 				},
 				{
 					"backtrace" : 6,
-					"fragment" : "-DCONFIG_INFANTRY=1"
+					"fragment" : "-DCONFIG_PROJECT=1"
 				}
 			],
 			"includes" : 
