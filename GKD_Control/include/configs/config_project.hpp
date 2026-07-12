@@ -15,7 +15,7 @@ namespace Config
 
     const std::vector<std::string> CanInitList = { "CAN_CHASSIS" };
 
-    const std::vector<std::string> SocketInitList = {};
+    const std::vector<std::string> SocketInitList = {"KEYBOARD_CONTROL"};
 
     const std::vector<std::tuple<std::string, int, int>> SerialInitList = 
         {

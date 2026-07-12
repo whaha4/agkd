@@ -33,7 +33,7 @@ namespace Robot
         std::shared_ptr<Robot_set> robot_set;
 
         Device::Rc_Controller rc_controller;
-        Device::Dji_referee referee;
+        //Device::Dji_referee referee;
         Chassis::Chassis chassis;
         Config::GimbalType gimbal;
         IFDEF(CONFIG_SENTRY, Gimbal::GimbalT gimbal_sentry);

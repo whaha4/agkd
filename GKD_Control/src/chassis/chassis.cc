@@ -46,7 +46,9 @@ namespace Chassis
     [[noreturn]] void Chassis::task() {
         std::jthread power_daemon(&Power::Manager::powerDaemon, &power_manager);
         while (true) { 
-            if (!robot_set->referee_info.game_robot_status_data.mains_power_chassis_output) {
+            //if (!robot_set->referee_info.game_robot_status_data.mains_power_chassis_output) 
+            if(false)
+            {
                 for (auto &motor : motors) {
                     motor.set_zero();
                 }
