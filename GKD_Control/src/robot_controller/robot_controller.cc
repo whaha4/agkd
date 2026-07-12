@@ -53,6 +53,10 @@ namespace Robot
         threads.emplace_back(&Chassis::Chassis::task, &chassis);
        //threads.emplace_back(&Device::Dji_referee::task, &referee);
        //threads.emplace_back(&Device::Dji_referee::task_ui, &referee);
+           std::this_thread::sleep_for(std::chrono::milliseconds(200));  // 等底盘线程就绪
+    robot_set->vx_set = 1.0;    // 前进 1m/s
+    std::this_thread::sleep_for(std::chrono::seconds(1));         // 走 1 秒
+    robot_set->vx_set = 0;      // 停
         IFDEF(CONFIG_SENTRY, threads.emplace_back(&Gimbal::GimbalT::task, &gimbal_sentry));
         IFDEF(__DEBUG__, threads.emplace_back(&Logger::task, &logger));
     }
