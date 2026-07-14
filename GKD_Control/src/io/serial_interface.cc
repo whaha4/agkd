@@ -288,7 +288,7 @@ namespace IO
                     enumerate_ports();
                     return;
                 }
-            } catch (serial::IOException &e) {
+            } catch (const std::exception &e) {
                 LOG_ERR("serail offline! end program now\n");
                 exit(-1);
             }
