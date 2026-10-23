@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <chrono>
 #include <fstream>
 #include <iostream>
 #include <thread>
@@ -16,6 +17,8 @@ namespace Power
     PowerStatus powerStatus;
     // 用户可配置功率下限（运行期会按模式/规则动态更新）
     static float MIN_MAXPOWER_CONFIGURED = 40.0f;
+    // 电容状态帧超时时间：超过该时间未收到 0x51 就认为电容反馈失效
+    static constexpr uint32_t CAP_FEEDBACK_TIMEOUT_MS = 100;
 
     // 浮点比较辅助：避免直接比较造成阈值抖动
     static inline bool floatEqual(float a, float b) {
@@ -106,15 +109,13 @@ namespace Power
 
 
 std::array<float, 4> Manager::getControlledOutput(PowerObj *objs[4]) {
-    std::array<float, 4> newTorqueCurrent; 
+    std::array<float, 4> newTorqueCurrent;
 
-    // 3508 近似扭矩常数(单位化后)，用于把“电流指令值”映射到“估算扭矩”
-    // 0.3*(187/3591) 来自项目历史标定常数
-    float torqueConst = 0.3 * ((float)187 / 3591);
-    // k0: 电流指令 -> 扭矩(Nm)比例
-    // 20/16384 来自 DJI 电流量程映射（20A 对应 16384 原始刻度）
-    float k0 =
-        torqueConst * 20 / 16384;  // torque current rate of the motor, defined as Nm/Output
+    // 3508 输出轴近似扭矩常数 (N·m/A)，与 curAv=output_angular_velocity 同侧
+    float torqueConst = 0.3f;
+    // k0: 电流指令 -> 输出轴扭矩(N·m)比例
+    // 20/16384: C620 电流指令量程，-16384..16384 对应 -20A..+20A
+    float k0 = torqueConst * 20.0f / 16384.0f;  // N·m per command unit
 
     // sumCmdPower: 四轮在“未限功率”下的总估算功率
     float sumCmdPower = 0.0f;
@@ -126,7 +127,10 @@ std::array<float, 4> Manager::getControlledOutput(PowerObj *objs[4]) {
     std::array<float, 4> error;
 
     // 当前循环可用最大功率，来自用户设置与能量环上下界综合约束
-    float maxPower = std::clamp(userConfiguredMaxPower, fullMaxPower, baseMaxPower);
+    // fullMaxPower/baseMaxPower 的大小关系会随能量环输出变化，先排序避免 clamp 的 lo > hi
+    const float powerLowerBound = std::min(fullMaxPower, baseMaxPower);
+    const float powerUpperBound = std::max(fullMaxPower, baseMaxPower);
+    float maxPower = std::clamp(userConfiguredMaxPower, powerLowerBound, powerUpperBound);
 
     // 可分配功率：先从 maxPower 起步，负功率轮会“返还预算”
     float allocatablePower = maxPower;
@@ -203,8 +207,12 @@ std::array<float, 4> Manager::getControlledOutput(PowerObj *objs[4]) {
             }
 
             // 综合权重 = 误差权重 与 功率权重 的线性插值
-            float powerWeight_Error = fabs(p->setAv - p->curAv) / sumError;
-            float powerWeight_Prop = cmdPower[i] / sumPowerRequired;
+            // sumError/sumPowerRequired 可能为 0（例如轮子堵转但目标速度等于当前速度），
+            // 直接相除会产生 NaN，进而让电流指令变成 NaN
+            float powerWeight_Error =
+                sumError > 1e-5f ? fabs(p->setAv - p->curAv) / sumError : 0.0f;
+            float powerWeight_Prop =
+                sumPowerRequired > 1e-5f ? cmdPower[i] / sumPowerRequired : 0.0f;
             float powerWeight = errorConfidence * powerWeight_Error +
                                 (1.0f - errorConfidence) * powerWeight_Prop;
 
@@ -279,38 +287,69 @@ std::array<float, 4> Manager::getControlledOutput(PowerObj *objs[4]) {
         while (true) {
             // 使用powerUpperLimit
             setMode(1);
-            float torqueConst = 0.3 * ((float)187 / 3591); // 把“输出侧扭矩常数”换到“转子侧扭矩常数”
-            float k0 =
-                torqueConst * 20 / 16384;  // 转子扭矩
+            float torqueConst = 0.3f; // 输出轴扭矩常数 (N·m/A)
+            float k0 = torqueConst * 20.0f / 16384.0f; // 输出轴扭矩 (N·m/指令单位)
             size_t now = clock();
 
-            // 电容能量估计:
-            // 协议里 capEnergy 为 0~255，内部映射到 0~2100 的工程量
-            estimatedCapEnergy = robot_set->super_cap_info.capEnergy / 255.0f * 2100.0f;
+            const uint32_t now_ms = static_cast<uint32_t>(
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now().time_since_epoch())
+                    .count());
+            const bool cap_online =
+                robot_set->super_cap_last_update_ms != 0 &&
+                (now_ms - robot_set->super_cap_last_update_ms) < CAP_FEEDBACK_TIMEOUT_MS;
 
-            // 注意: 这里对 capEnergy 取 sqrt，因为发来之前平方过
-            // 对应地，目标 fullBuffSet/baseBuffSet 也在相同域上比较，便于 PD 调节。
-            powerBuff = sqrtf(robot_set->super_cap_info.capEnergy);
+            if (cap_online) {
+                // 电容能量估计:
+                // 协议里 capEnergy 为 0~255，内部映射到 0~2100 的工程量
+                estimatedCapEnergy = robot_set->super_cap_info.capEnergy / 255.0f * 2100.0f;
 
-            fullBuffSet = capFullBuffSet;  // 250
-            baseBuffSet = capBaseBuffSet;  // 100
+                // 注意: 这里对 capEnergy 取 sqrt，因为发来之前平方过
+                // 对应地，目标 fullBuffSet/baseBuffSet 也在相同域上比较，便于 PD 调节。
+                powerBuff = sqrtf(robot_set->super_cap_info.capEnergy);
 
-            // 基础功率上限：取电容反馈的 chassisPowerlimit，并加保底下界
-            refereeMaxPower = fmax(
-                robot_set->super_cap_info.chassisPowerlimit,
-                CAP_OFFLINE_ENERGY_RUNOUT_POWER_THRESHOLD);
+                fullBuffSet = capFullBuffSet;  // 250
+                baseBuffSet = capBaseBuffSet;  // 100
+            } else {
+                // 电容反馈超时: 不再使用过期能量，按裁判缓冲能量的量纲配置目标
+                estimatedCapEnergy = 0.0f;
+                powerBuff = 0.0f;
+                fullBuffSet = refereeFullBuffSet;  // 60
+                baseBuffSet = refereeBaseBuffSet;  // 50
+            }
 
-            // 上限=裁判上限+电容额外输出
-            powerUpperLimit = refereeMaxPower + MAX_CAP_POWER_OUT;
+            if (cap_online) {
+                // 基础功率上限：取电容反馈的 chassisPowerlimit，并加保底下界
+                refereeMaxPower = fmax(
+                    robot_set->super_cap_info.chassisPowerlimit,
+                    CAP_OFFLINE_ENERGY_RUNOUT_POWER_THRESHOLD);
+                // 上限=裁判上限+电容额外输出
+                powerUpperLimit = refereeMaxPower + MAX_CAP_POWER_OUT;
+            } else {
+                // 电容反馈超时：退化为裁判系统最后一次下发的功率上限，并保守收缩
+                refereeMaxPower = fmax(
+                    static_cast<float>(
+                        robot_set->referee_info.game_robot_status_data.chassis_power_limit),
+                    CAP_OFFLINE_ENERGY_RUNOUT_POWER_THRESHOLD);
+                powerUpperLimit = fmax(
+                    refereeMaxPower * CAP_REFEREE_BOTH_GG_COE,
+                    MIN_MAXPOWER_CONFIGURED);
+            }
             // LOG_INFO("powerUpperLimit:%f, refereeMaxpower: %f\n", powerUpperLimit, refereeMaxPower);
             powerLowerLimit = 50;
 
-            // 能量环:
-            // 目标与当前都在 sqrt 域，PD 输出作为“需要扣减的功率”
-            powerPD_base.set(sqrtf(baseBuffSet));
-            powerPD_full.set(sqrtf(fullBuffSet));
-            baseMaxPower = fmax(refereeMaxPower - powerPD_base.out, MIN_MAXPOWER_CONFIGURED);
-            fullMaxPower = fmax(refereeMaxPower - powerPD_full.out, MIN_MAXPOWER_CONFIGURED);
+            if (cap_online) {
+                // 能量环:
+                // 目标与当前都在 sqrt 域，PD 输出作为“需要扣减的功率”
+                powerPD_base.set(sqrtf(baseBuffSet));
+                powerPD_full.set(sqrtf(fullBuffSet));
+                baseMaxPower = fmax(refereeMaxPower - powerPD_base.out, MIN_MAXPOWER_CONFIGURED);
+                fullMaxPower = fmax(refereeMaxPower - powerPD_full.out, MIN_MAXPOWER_CONFIGURED);
+            } else {
+                // 电容离线时没有可信能量反馈，直接使用保守上限，跳过能量环
+                baseMaxPower = powerUpperLimit;
+                fullMaxPower = powerUpperLimit;
+            }
 
             // 基于反馈电流与转速，计算模型输入
             effectivePower = 0;
@@ -319,11 +358,18 @@ std::array<float, 4> Manager::getControlledOutput(PowerObj *objs[4]) {
             for (int i = 0; i < 4; i++) {
                 //LOG_INFO("%d", motors[i].motor_measure_.given_current);
 
-                // τω 项
-                effectivePower += motors[i].motor_measure_.given_current * k0 *
-                                  rpm2av(motors[i].motor_measure_.speed_rpm);
+                // 离线电机的反馈已过期，不参与模型/RLS 统计
+                if (motors[i].offline()) {
+                    continue;
+                }
+
+                // 统一用输出轴角速度，与 getControlledOutput 的 curAv 同侧
+                const float output_av = motors[i].data_.output_angular_velocity;
+
+                // τω 项（输出轴扭矩 × 输出轴角速度）
+                effectivePower += motors[i].motor_measure_.given_current * k0 * output_av;
                 // |ω| 累加项（对应 k1）
-                samples[0][0] += fabsf(rpm2av(motors[i].motor_measure_.speed_rpm));
+                samples[0][0] += fabsf(output_av);
                 // τ² 累加项（对应 k2）
                 samples[1][0] += motors[i].motor_measure_.given_current * k0 *
                                  motors[i].motor_measure_.given_current * k0;
@@ -334,7 +380,12 @@ std::array<float, 4> Manager::getControlledOutput(PowerObj *objs[4]) {
             // Get the measured power from cap
             // If cap is disconnected, get measured power from referee feedback if cap
             // energy is out Otherwise, set it to estimated power
-            measuredPower = robot_set->super_cap_info.chassisPower;
+            if (cap_online) {
+                measuredPower = robot_set->super_cap_info.chassisPower;
+            } else {
+                // 电容功率反馈已过期，使用模型估计值，且不再更新 RLS
+                measuredPower = estimatedPower;
+            }
             // NOTE: log k1 k2 k3
             // LOG_INFO(
             //     "%f %f %f %f %f %f\n", measuredPower, effectivePower, estimatedPower, k1, k2,
@@ -366,15 +417,30 @@ std::array<float, 4> Manager::getControlledOutput(PowerObj *objs[4]) {
             powerStatus.userConfiguredMaxPower = userConfiguredMaxPower;
             powerStatus.effectivePower = effectivePower;
             powerStatus.powerLoss = measuredPower - effectivePower;
-            powerStatus.efficiency = std::clamp(effectivePower / measuredPower, 0.0f, 1.0f);
+            powerStatus.efficiency =
+                fabsf(measuredPower) > 1e-3f
+                    ? std::clamp(effectivePower / measuredPower, 0.0f, 1.0f)
+                    : 0.0f;
             powerStatus.estimatedCapEnergy =
                 static_cast<uint8_t>(estimatedCapEnergy / 2100.0f * 255.0f);
+
+            // 刷新错误标志（供状态显示/调试）
+            error = 0;
+            if (!cap_online) {
+                setErrorFlag(error, Manager::CAPDisConnect);
+            }
+            for (int i = 0; i < 4; ++i) {
+                if (motors[i].offline()) {
+                    setErrorFlag(error, Manager::MotorDisconnect);
+                    break;
+                }
+            }
             powerStatus.error = static_cast<Manager::ErrorFlags>(error);
 
             // RLS 在线辨识:
             // measuredPower - effectivePower - k3 = k1*Σ|ω| + k2*Στ²
             // 小功率区间不更新，降低噪声放大
-            if (fabs(measuredPower) > 5.0f) {
+            if (cap_online && fabs(measuredPower) > 5.0f) {
                 params = rls.update(samples, measuredPower - effectivePower - k3);
                 k1 = fmax(params[0][0],
                           1e-5f);  // In case the k1 diverge to negative number

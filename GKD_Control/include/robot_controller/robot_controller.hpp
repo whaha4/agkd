@@ -28,7 +28,7 @@ namespace Robot
         void join();
 
        public:
-        std::vectorstd::jthread> threads;<
+        std::vector<std::jthread> threads;
 
         std::shared_ptr<Robot_set> robot_set;
 

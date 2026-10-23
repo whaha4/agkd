@@ -15,6 +15,7 @@ end)
 target("GKDControl")
 set_kind("binary")
 set_languages("c++23")
+add_files("src/*.cc", "src/**/*.cc")
 add_includedirs(
 	"include",
 	"include/chassis",

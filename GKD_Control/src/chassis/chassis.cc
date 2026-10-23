@@ -101,9 +101,18 @@ namespace Chassis
 
                 // Power Limit
                 for (int i = 0; i < 4; ++i) {
-                    objs[i].curAv = motors[i].motor_measure_.speed_rpm * M_PIf / 30;
+                    if (motors[i].offline()) {
+                        // 离线电机不参与本轮功率分配，避免用过期反馈占用功率预算
+                        objs[i].curAv = 0.f;
+                        objs[i].pidOutput = 0.f;
+                        objs[i].setAv = 0.f;
+                        objs[i].pidMaxOutput = 0.f;
+                        continue;
+                    }
+                    // 统一到输出轴（轮端）量纲，和 k0/k1/k2 保持一致
+                    objs[i].curAv = motors[i].data_.output_angular_velocity;
                     objs[i].pidOutput = wheels_pid[i].out;
-                    objs[i].setAv = wheel_speed[i];
+                    objs[i].setAv = wheel_speed[i] / motors[i].data_.radius;
                     objs[i].pidMaxOutput = 14000;
                 }
                 static Power::PowerObj *pObjs[4] = { &objs[0], &objs[1], &objs[2], &objs[3] };
@@ -118,13 +127,12 @@ namespace Chassis
                 for (int i = 0; i < 4; ++i) {
                     if (motors[i].offline()) {
                         LOG_ERR("chassis_%d offline\n", i + 1);
-                        // exit(-1);
+                        // 离线电机不再输出，避免使用过期反馈继续驱动
+                        motors[i].give_current = 0.f;
+                    } else {
+                        // 功率限制后的电流指令
+                        motors[i].give_current = cmd_power[i];
                     }
-                /*
-                TODO功率限制需要修改，现在直接输出pidout
-                */
-                    motors[i].give_current = wheels_pid[i].out;
-                    // motors[i].give_current = cmd_power[i];
                     //LOG_INFO("i:%d, plan:%f, fact:%f\n", i, cmd_power[i], robot_set->super_cap_info.chassisPower);
                 }
             }
