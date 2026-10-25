@@ -1,5 +1,7 @@
 #include "chassis/chassis.hpp"
 
+#include <array>
+#include <cstdint>
 #include <cstdlib>
 #include <string>
 #include <thread>
@@ -11,6 +13,9 @@
 
 namespace Chassis
 {
+    // 轮电机反馈丢失判定时间：C620 约 1 kHz 反馈，40 ms 约等于连续丢 40 帧
+    constexpr uint32_t WHEEL_OFFLINE_TIME_MS = 40;
+
     Chassis::Chassis(const ChassisConfig &config)
         : config(config),
           motors(config.wheels_config.begin(), config.wheels_config.end()),
@@ -32,6 +37,7 @@ namespace Chassis
                             Pid::Invert(config.follow_dir);
 
         for (auto &motor : motors) {
+            motor.set_offline_time(WHEEL_OFFLINE_TIME_MS);
             motor.setCtrl(Pid::PidPosition(
                 config.wheel_speed_pid_config, motor.data_.output_linear_velocity));
             motor.enable();
@@ -82,6 +88,10 @@ namespace Chassis
             } else {
                 fp32 max_speed = 0.f;
                 for (int i = 0; i < 4; i++) {
+                    // 离线轮的目标不参与限速统计，避免它的错误目标拖慢健康轮
+                    if (motors[i].offline()) {
+                        continue;
+                    }
                     max_speed = std::max(max_speed, fabsf(wheel_speed[i]));
                 }
                 //TODO 增加加速度限制
@@ -93,7 +103,12 @@ namespace Chassis
                 }
 
                 for (int i = 0; i < 4; i++) {
-                    wheels_pid[i].set(wheel_speed[i]);
+                    if (motors[i].offline()) {
+                        // 离线期间每周期清积分，恢复时不会带着旧积分反冲
+                        wheels_pid[i].clean();
+                    } else {
+                        wheels_pid[i].set(wheel_speed[i]);
+                    }
                 }
 
                 robot_set->spin_state = robot_set->wz_set < 0.1 ? false : true;
@@ -125,14 +140,8 @@ namespace Chassis
                 // }
 
                 for (int i = 0; i < 4; ++i) {
-                    if (motors[i].offline()) {
-                        LOG_ERR("chassis_%d offline\n", i + 1);
-                        // 离线电机不再输出，避免使用过期反馈继续驱动
-                        motors[i].give_current = 0.f;
-                    } else {
-                        // 功率限制后的电流指令
-                        motors[i].give_current = cmd_power[i];
-                    }
+                    // 离线电机不再输出，避免使用过期反馈继续驱动
+                    motors[i].give_current = motors[i].offline() ? 0.f : cmd_power[i];
                     //LOG_INFO("i:%d, plan:%f, fact:%f\n", i, cmd_power[i], robot_set->super_cap_info.chassisPower);
                 }
             }

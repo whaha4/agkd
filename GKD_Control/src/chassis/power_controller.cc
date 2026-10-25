@@ -109,7 +109,8 @@ namespace Power
 
 
 std::array<float, 4> Manager::getControlledOutput(PowerObj *objs[4]) {
-    std::array<float, 4> newTorqueCurrent;
+    // 先全零，离线轮和异常分支都不会留下未初始化值
+    std::array<float, 4> newTorqueCurrent{};
 
     // 3508 输出轴近似扭矩常数 (N·m/A)，与 curAv=output_angular_velocity 同侧
     float torqueConst = 0.3f;
@@ -132,8 +133,18 @@ std::array<float, 4> Manager::getControlledOutput(PowerObj *objs[4]) {
     const float powerUpperBound = std::max(fullMaxPower, baseMaxPower);
     float maxPower = std::clamp(userConfiguredMaxPower, powerLowerBound, powerUpperBound);
 
-    // 可分配功率：先从 maxPower 起步，负功率轮会“返还预算”
-    float allocatablePower = maxPower;
+    // 离线轮的 k3/4 作为不可避免的固定损耗预留，但不作为可分权重需求
+    float offlineFixedLoss = 0.0f;
+    for (int i = 0; i < 4; ++i) {
+        if (motors[i].offline()) {
+            offlineFixedLoss += k3 / 4.0f;
+        }
+    }
+    // 未限功率前的总估算功率，从离线轮的固定损耗起算
+    sumCmdPower = offlineFixedLoss;
+
+    // 可分配功率：先扣除离线轮固定损耗，负功率轮会“返还预算”
+    float allocatablePower = std::max(maxPower - offlineFixedLoss, 0.0f);
     // 正功率轮的总需求（用于按权重切分）
     float sumPowerRequired = 0.0f;
 #if USE_DEBUG
@@ -141,6 +152,12 @@ std::array<float, 4> Manager::getControlledOutput(PowerObj *objs[4]) {
 #endif
 
     for (int i = 0; i < 4; i++) {
+        if (motors[i].offline()) {
+            // 离线轮不参与功率需求、误差权重和预算分配
+            cmdPower[i] = 0.0f;
+            error[i] = 0.0f;
+            continue;
+        }
         PowerObj *p = objs[i];
         // 单轮功率模型:
         // P = τω + k1|ω| + k2τ² + k3/4
@@ -198,6 +215,10 @@ std::array<float, 4> Manager::getControlledOutput(PowerObj *objs[4]) {
             errorConfidence = 0.0f;
         }
         for (int i = 0; i < 4; i++) {
+            if (motors[i].offline()) {
+                newTorqueCurrent[i] = 0.0f;
+                continue;
+            }
             PowerObj *p = objs[i];
 
             // 负功率轮不参与削峰，保持原输出（它本身就在降总功率）
@@ -246,23 +267,34 @@ std::array<float, 4> Manager::getControlledOutput(PowerObj *objs[4]) {
         }
     } else {
         for (int i = 0; i < 4; i++) {
-            newTorqueCurrent[i] = objs[i]->pidOutput;
+            newTorqueCurrent[i] = motors[i].offline() ? 0.0f : objs[i]->pidOutput;
         }
     }
 
     // 调试用途：统计限幅后的总估算功率
     float newCmdPower = 0.0f;
     for (int i = 0; i < 4; i++) {
+        if (motors[i].offline()) {
+            // 离线轮只保留固定损耗，不估算电流项
+            newCmdPower += k3 / 4.0f;
+            continue;
+        }
         PowerObj *p = objs[i];
         newCmdPower += newTorqueCurrent[i] * k0 * p->curAv + fabs(p->curAv) * k1 +
                        newTorqueCurrent[i] * k0 * newTorqueCurrent[i] * k0 * k2 + k3 / 4.0f;
     }
-    LOG_INFO(
-        "sumPower: %f, NewCMDPower power: %f, measuredPower: %f, capEnergy: %d\n",
-        sumPowerRequired,
-        newCmdPower,
-        robot_set->super_cap_info.chassisPower,
-        robot_set->super_cap_info.capEnergy);
+    // 该函数每 2 ms 调用一次，日志限频，避免热路径阻塞
+    static auto lastLogTime = std::chrono::steady_clock::now();
+    const auto logNow = std::chrono::steady_clock::now();
+    if (logNow - lastLogTime >= std::chrono::milliseconds(500)) {
+        lastLogTime = logNow;
+        LOG_INFO(
+            "sumPower: %f, NewCMDPower power: %f, measuredPower: %f, capEnergy: %d\n",
+            sumPowerRequired,
+            newCmdPower,
+            robot_set->super_cap_info.chassisPower,
+            robot_set->super_cap_info.capEnergy);
+    }
 
     //      #endif
 
@@ -355,11 +387,13 @@ std::array<float, 4> Manager::getControlledOutput(PowerObj *objs[4]) {
             effectivePower = 0;
             samples[0][0] = 0;
             samples[1][0] = 0;
+            bool any_offline = false;
             for (int i = 0; i < 4; i++) {
                 //LOG_INFO("%d", motors[i].motor_measure_.given_current);
 
                 // 离线电机的反馈已过期，不参与模型/RLS 统计
                 if (motors[i].offline()) {
+                    any_offline = true;
                     continue;
                 }
 
@@ -440,7 +474,7 @@ std::array<float, 4> Manager::getControlledOutput(PowerObj *objs[4]) {
             // RLS 在线辨识:
             // measuredPower - effectivePower - k3 = k1*Σ|ω| + k2*Στ²
             // 小功率区间不更新，降低噪声放大
-            if (cap_online && fabs(measuredPower) > 5.0f) {
+            if (cap_online && !any_offline && fabs(measuredPower) > 5.0f) {
                 params = rls.update(samples, measuredPower - effectivePower - k3);
                 k1 = fmax(params[0][0],
                           1e-5f);  // In case the k1 diverge to negative number
