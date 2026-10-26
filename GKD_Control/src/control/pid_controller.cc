@@ -1,5 +1,7 @@
 #include "pid_controller.hpp"
 
+#include <cmath>
+
 #include "user_lib.hpp"
 
 namespace Pid
@@ -9,13 +11,19 @@ namespace Pid
         error[0] = (set_v - ref);
 
         Pout = kp * error[0];
-        Iout += ki * error[0];
         Dbuf = (error[0] - error[1]);
         Dout = kd * Dbuf;
 
+        const fp32 pd = Pout + Dout;
+        const fp32 unsat = pd + Iout;
+
+        // 条件积分: 输出已饱和且误差仍在往饱和方向推时，本拍不再积分
+        if (!(std::abs(unsat) > max_out && error[0] * unsat > 0.f)) {
+            Iout += ki * error[0];
+        }
         Iout = std::clamp(Iout, -max_iout, max_iout);
-        out = Pout + Iout + Dout;
-        out = std::clamp(out, -max_out, max_out);
+
+        out = std::clamp(pd + Iout, -max_out, max_out);
     }
 
     void PidPosition::clean() {
@@ -30,12 +38,18 @@ namespace Pid
 
         err = UserLib::rad_format(set - ref);
         Pout = kp * err;
-        Iout += ki * err;
         Dout = kd * (err - last_err);
 
+        const fp32 pd = Pout + Dout;
+        const fp32 unsat = pd + Iout;
+
+        // 条件积分: 输出已饱和且误差仍在往饱和方向推时，本拍不再积分
+        if (!(std::abs(unsat) > max_out && err * unsat > 0.f)) {
+            Iout += ki * err;
+        }
         Iout = std::clamp(Iout, -max_iout, max_iout);
-        out = Pout + Iout + Dout;
-        out = std::clamp(out, -max_out, max_out);
+
+        out = std::clamp(pd + Iout, -max_out, max_out);
     }
 
     void Invert::set(const fp32 set) {

@@ -140,6 +140,8 @@ namespace Shoot
                     }
                 } else if (isJam()) {
                     trigger.set_zero();
+                    // 堵弹时绕过 PID，顺手清掉积分/误差，防止解除后带着旧输出
+                    trigger.controller.clean();
                     LOG_INFO("%d\n", trigger.motor_measure_.given_current);
                     LOG_INFO("jam%d\n", delta++);
 
