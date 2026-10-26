@@ -64,8 +64,6 @@ namespace Robot
         Types::ROBOT_MODE last_mode = Types::ROBOT_MODE::ROBOT_NO_FORCE;
 
         Types::ReceivePacket_Super_Cap super_cap_info;
-        // 超级电容状态帧最后一次解析的时间（steady_clock 毫秒），用于通信超时判断
-        uint32_t super_cap_last_update_ms = 0;
         Types::Referee_info referee_info;
 
         void set_mode(Types::ROBOT_MODE set_mode) {

@@ -17,8 +17,6 @@ namespace Power
     PowerStatus powerStatus;
     // 用户可配置功率下限（运行期会按模式/规则动态更新）
     static float MIN_MAXPOWER_CONFIGURED = 40.0f;
-    // 电容状态帧超时时间：超过该时间未收到 0x51 就认为电容反馈失效
-    static constexpr uint32_t CAP_FEEDBACK_TIMEOUT_MS = 100;
 
     // 浮点比较辅助：避免直接比较造成阈值抖动
     static inline bool floatEqual(float a, float b) {
@@ -323,65 +321,32 @@ std::array<float, 4> Manager::getControlledOutput(PowerObj *objs[4]) {
             float k0 = torqueConst * 20.0f / 16384.0f; // 输出轴扭矩 (N·m/指令单位)
             size_t now = clock();
 
-            const uint32_t now_ms = static_cast<uint32_t>(
-                std::chrono::duration_cast<std::chrono::milliseconds>(
-                    std::chrono::steady_clock::now().time_since_epoch())
-                    .count());
-            const bool cap_online =
-                robot_set->super_cap_last_update_ms != 0 &&
-                (now_ms - robot_set->super_cap_last_update_ms) < CAP_FEEDBACK_TIMEOUT_MS;
+            // 电容能量估计:
+            // 协议里 capEnergy 为 0~255，内部映射到 0~2100 的工程量
+            estimatedCapEnergy = robot_set->super_cap_info.capEnergy / 255.0f * 2100.0f;
 
-            if (cap_online) {
-                // 电容能量估计:
-                // 协议里 capEnergy 为 0~255，内部映射到 0~2100 的工程量
-                estimatedCapEnergy = robot_set->super_cap_info.capEnergy / 255.0f * 2100.0f;
+            // 注意: 这里对 capEnergy 取 sqrt，因为发来之前平方过
+            // 对应地，目标 fullBuffSet/baseBuffSet 也在相同域上比较，便于 PD 调节。
+            powerBuff = sqrtf(robot_set->super_cap_info.capEnergy);
 
-                // 注意: 这里对 capEnergy 取 sqrt，因为发来之前平方过
-                // 对应地，目标 fullBuffSet/baseBuffSet 也在相同域上比较，便于 PD 调节。
-                powerBuff = sqrtf(robot_set->super_cap_info.capEnergy);
+            fullBuffSet = capFullBuffSet;  // 250
+            baseBuffSet = capBaseBuffSet;  // 100
 
-                fullBuffSet = capFullBuffSet;  // 250
-                baseBuffSet = capBaseBuffSet;  // 100
-            } else {
-                // 电容反馈超时: 不再使用过期能量，按裁判缓冲能量的量纲配置目标
-                estimatedCapEnergy = 0.0f;
-                powerBuff = 0.0f;
-                fullBuffSet = refereeFullBuffSet;  // 60
-                baseBuffSet = refereeBaseBuffSet;  // 50
-            }
-
-            if (cap_online) {
-                // 基础功率上限：取电容反馈的 chassisPowerlimit，并加保底下界
-                refereeMaxPower = fmax(
-                    robot_set->super_cap_info.chassisPowerlimit,
-                    CAP_OFFLINE_ENERGY_RUNOUT_POWER_THRESHOLD);
-                // 上限=裁判上限+电容额外输出
-                powerUpperLimit = refereeMaxPower + MAX_CAP_POWER_OUT;
-            } else {
-                // 电容反馈超时：退化为裁判系统最后一次下发的功率上限，并保守收缩
-                refereeMaxPower = fmax(
-                    static_cast<float>(
-                        robot_set->referee_info.game_robot_status_data.chassis_power_limit),
-                    CAP_OFFLINE_ENERGY_RUNOUT_POWER_THRESHOLD);
-                powerUpperLimit = fmax(
-                    refereeMaxPower * CAP_REFEREE_BOTH_GG_COE,
-                    MIN_MAXPOWER_CONFIGURED);
-            }
+            // 基础功率上限：取电容反馈的 chassisPowerlimit，并加保底下界
+            refereeMaxPower = fmax(
+                robot_set->super_cap_info.chassisPowerlimit,
+                CAP_OFFLINE_ENERGY_RUNOUT_POWER_THRESHOLD);
+            // 上限=裁判上限+电容额外输出
+            powerUpperLimit = refereeMaxPower + MAX_CAP_POWER_OUT;
             // LOG_INFO("powerUpperLimit:%f, refereeMaxpower: %f\n", powerUpperLimit, refereeMaxPower);
             powerLowerLimit = 50;
 
-            if (cap_online) {
-                // 能量环:
-                // 目标与当前都在 sqrt 域，PD 输出作为“需要扣减的功率”
-                powerPD_base.set(sqrtf(baseBuffSet));
-                powerPD_full.set(sqrtf(fullBuffSet));
-                baseMaxPower = fmax(refereeMaxPower - powerPD_base.out, MIN_MAXPOWER_CONFIGURED);
-                fullMaxPower = fmax(refereeMaxPower - powerPD_full.out, MIN_MAXPOWER_CONFIGURED);
-            } else {
-                // 电容离线时没有可信能量反馈，直接使用保守上限，跳过能量环
-                baseMaxPower = powerUpperLimit;
-                fullMaxPower = powerUpperLimit;
-            }
+            // 能量环:
+            // 目标与当前都在 sqrt 域，PD 输出作为“需要扣减的功率”
+            powerPD_base.set(sqrtf(baseBuffSet));
+            powerPD_full.set(sqrtf(fullBuffSet));
+            baseMaxPower = fmax(refereeMaxPower - powerPD_base.out, MIN_MAXPOWER_CONFIGURED);
+            fullMaxPower = fmax(refereeMaxPower - powerPD_full.out, MIN_MAXPOWER_CONFIGURED);
 
             // 基于反馈电流与转速，计算模型输入
             effectivePower = 0;
@@ -411,15 +376,8 @@ std::array<float, 4> Manager::getControlledOutput(PowerObj *objs[4]) {
             // 总估计功率 = k1*Σ|ω| + k2*Στ² + Στω + k3
             estimatedPower = k1 * samples[0][0] + k2 * samples[1][0] + effectivePower + k3;
 
-            // Get the measured power from cap
-            // If cap is disconnected, get measured power from referee feedback if cap
-            // energy is out Otherwise, set it to estimated power
-            if (cap_online) {
-                measuredPower = robot_set->super_cap_info.chassisPower;
-            } else {
-                // 电容功率反馈已过期，使用模型估计值，且不再更新 RLS
-                measuredPower = estimatedPower;
-            }
+            // 电容实测底盘功率
+            measuredPower = robot_set->super_cap_info.chassisPower;
             // NOTE: log k1 k2 k3
             // LOG_INFO(
             //     "%f %f %f %f %f %f\n", measuredPower, effectivePower, estimatedPower, k1, k2,
@@ -460,9 +418,6 @@ std::array<float, 4> Manager::getControlledOutput(PowerObj *objs[4]) {
 
             // 刷新错误标志（供状态显示/调试）
             error = 0;
-            if (!cap_online) {
-                setErrorFlag(error, Manager::CAPDisConnect);
-            }
             for (int i = 0; i < 4; ++i) {
                 if (motors[i].offline()) {
                     setErrorFlag(error, Manager::MotorDisconnect);
@@ -474,7 +429,7 @@ std::array<float, 4> Manager::getControlledOutput(PowerObj *objs[4]) {
             // RLS 在线辨识:
             // measuredPower - effectivePower - k3 = k1*Σ|ω| + k2*Στ²
             // 小功率区间不更新，降低噪声放大
-            if (cap_online && !any_offline && fabs(measuredPower) > 5.0f) {
+            if (!any_offline && fabs(measuredPower) > 5.0f) {
                 params = rls.update(samples, measuredPower - effectivePower - k3);
                 k1 = fmax(params[0][0],
                           1e-5f);  // In case the k1 diverge to negative number
