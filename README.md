@@ -1,21 +1,28 @@
 # 相对 c634f18 的修改说明
 
-本文只记录本仓库相对 `c634f18` 的两项修改：**单轮离线容错**、**PID 条件积分抗饱和**。
+本文记录本仓库相对 `c634f18` 的全部代码修改。主要分为**单轮离线容错**、**PID 条件积分抗饱和**，其余改动归入“其他修复”。
 
-- 对比基线：`c634f18`（2026-07-04，来源于gkd仓库）
-- 当前代码：`0e0bbcf`（分支 `回退超电通信超时降级，保留其余功率修复`）
-- 代码差异：15 个文件，+183 / −112（下表只列与这两项修改直接相关的文件）
+- 对比基线：`c634f18`（2026-07-04，来源于 gkd 仓库）
+- 当前代码版本：`0e0bbcf`（分支 `回退超电通信超时降级，保留其余功率修复`）
+- 代码差异：15 个文件，+183 / −112
 
-## 修改文件
+## 代码修改文件
 
 | 文件 | 修改内容 |
 | --- | --- |
-| `GKD_Control/src/device/device_base.cc` | 离线计时改用 `steady_clock`；实现 `set_offline_time()` |
-| `GKD_Control/include/device/deviece_base.hpp` | 新增 `set_offline_time()` 声明 |
-| `GKD_Control/src/chassis/chassis.cc` | 离线轮不参与限速、清理 PID、输出置零 |
-| `GKD_Control/src/chassis/power_controller.cc` | 离线轮功率预留、排除与 RLS 跳过 |
+| `GKD_Control/src/chassis/chassis.cc` | 轮速 / 角速度量纲统一；离线轮处理；底盘输出改用功率限制后的电流 |
+| `GKD_Control/include/chassis/power_controller.hpp` | 注释中的转速 / 扭矩量纲改为输出轴 |
+| `GKD_Control/src/chassis/power_controller.cc` | 功率模型量纲统一、NaN 防护、日志限频、离线轮功率处理 |
+| `GKD_Control/src/device/super_cap.cc` | 修正 0x61 控制帧字段顺序 |
+| `GKD_Control/include/device/deviece_base.hpp` | 离线计时改用 `steady_clock`；新增 `set_offline_time()` |
+| `GKD_Control/src/device/device_base.cc` | 同上，实现离线时间设置 |
 | `GKD_Control/src/control/pid_controller.cc` | `PidPosition`、`PidRad` 加入条件积分抗饱和 |
 | `ControlLib/src/pid.cpp` | 同步加入条件积分抗饱和 |
+| `GKD_Control/src/shoot/shoot.cc` | 堵弹时清理拨弹 PID 状态 |
+| `GKD_Control/src/control/controller.cc` | 修复 `ControllerLirelost` 拼写错误 |
+| `GKD_Control/include/robot_controller/robot_controller.hpp` | 修复 `std::vectorstd::jthread>` 拼写错误 |
+| `GKD_Control/xmake.lua` | 显式加入 `add_files("src/*.cc", "src/**/*.cc")` |
+| `hello.cpp`、`tests.cpp`、`tests.exe` | 删除根目录临时文件 |
 
 ## 1. 单轮离线容错
 
@@ -37,7 +44,7 @@
 
 - 该轮速度环每周期被 `clean()`，下发电流置 0；
 - 功率分配跳过该轮，只为它保留 `k3/4` 固定损耗；
-- 其余三轮继续按逆解结果驱动，机器人仍可移动或平稳停车，但因坏的轮子仍会拖着机器，所以没法做到准确移动
+- 其余三轮继续按逆解结果驱动，机器人仍可移动或平稳停车，但因坏的轮子仍会拖着机器，所以没法做到准确移动。
 
 简化后的处理逻辑：
 
@@ -77,6 +84,58 @@ out = std::clamp(pd + Iout, -max_out, max_out);
 
 - 旧实现：`Iout` 继续累加，最终顶到 `max_iout = 2000`；障碍解除后积分需要时间退掉，轮子会先冲一下。
 - 新实现：输出饱和且误差同向时停止积分，`Iout` 保持 0；障碍解除后直接按当前误差重新调节。
+
+## 3. 其他修复
+
+### 3.1 底盘功率模型量纲统一
+
+`GKD_Control/src/chassis/power_controller.cc`、`GKD_Control/src/chassis/chassis.cc`
+
+- `curAv` 从 `speed_rpm * π / 30` 改为电机输出轴角速度 `output_angular_velocity`。
+- `setAv` 从轮速（m/s）改为 `wheel_speed / radius`（输出轴 rad/s）。
+- `k0` 去掉转子到输出轴的减速比折算，改为 `0.3 × 20 / 16384`（输出轴 N·m / 电流指令单位）。
+- 功率模型四项、RLS 输入、`estimatedPower` 全部统一到输出轴量纲：
+
+  ```
+  P ≈ τ·ω + k1·|ω| + k2·τ² + k3/4
+  ```
+
+- 底盘实际下发从原始 PID 输出改为功率限制后的 `cmd_power[i]`。
+
+### 3.2 超电控制帧字段修正
+
+`GKD_Control/src/device/super_cap.cc`
+
+- 修正 0x61 控制帧中 `chassis_power_limit` 与 `chassis_power_buffer` 两个字段写反的问题。
+
+### 3.3 数值与日志健壮性
+
+`GKD_Control/src/chassis/power_controller.cc`
+
+- `newTorqueCurrent` 默认初始化为 0，避免异常分支留下未初始化值。
+- `sumError` / `sumPowerRequired` 接近 0 时不再直接相除，避免 NaN 电流指令。
+- `std::clamp` 前先对 `fullMaxPower` / `baseMaxPower` 排序，避免上下界颠倒。
+- `powerStatus.efficiency` 在 `measuredPower` 接近 0 时直接取 0，避免除零。
+- 功率日志从每 2 ms 输出改为 500 ms 限频，避免热路径阻塞。
+
+### 3.4 堵弹时清理拨弹控制器
+
+`GKD_Control/src/shoot/shoot.cc`
+
+- 堵弹判定仍为 `given_current > 4000 && speed_rpm < 1`。
+- 堵弹后拨弹输出置零，并调用 `trigger.controller.clean()` 清掉积分 / 误差，防止解除后带着旧输出。
+
+### 3.5 编译与清理
+
+- 修复 `ControllerList` 的 `ControllerLirelost` 拼写错误。
+- 修复 `std::vectorstd::jthread>` 拼写错误。
+- xmake 显式加入 `add_files`。
+- 删除根目录 `hello.cpp`、`tests.cpp`、`tests.exe`。
+
+## 文档
+
+- `README.md`：本修改说明。
+- `may_imporve/supercap-communication-timeout-degradation.md`：超级电容通信超时降级方案留档；该方案已从当前代码回退，代码中未启用。
 
 ## 验证
 
